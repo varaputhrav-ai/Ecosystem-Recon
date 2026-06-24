@@ -25,42 +25,78 @@ PACKAGING_CODES = [
 
 AMOUNT_TOLERANCE = 1.0   # ₹1 tolerance for amount comparison
 
-# Column identifiers to auto-detect sheet type
-SALES_SIGNATURE  = {'INVOICE_NO', 'SELLER_GSTIN', 'CUSTOMER_GSTIN', 'INVOICE_VALUE'}
-WMS_SIGNATURE    = {'Invoice_No', 'Supplier_GSTIN', 'Entity_GSTIN', 'Sum of Total_Amt_with_Tax'}
-ZOHO_SIGNATURE   = {'Bill Number', 'Vendor GSTIN', 'Entity GSTIN', 'Gross Total'}
+# ── Column candidates (ordered by priority) ──────────────────────────────────
+# Each key maps to a list of possible column names across different file formats.
+# find_col() picks the first one that exists in the dataframe.
 
-# Canonical column names per source
-SALES = {
-    'inv':          'INVOICE_NO',
-    'seller_gstin': 'SELLER_GSTIN',
-    'buyer_gstin':  'CUSTOMER_GSTIN',
-    'seller_name':  'SELLER_ENTITY',
-    'buyer_name':   'BUYER_ENTITY',
-    'taxable':      'TAXABLE_VALUE',
-    'tax':          'TAX_VALUE',
-    'total':        'INVOICE_VALUE',
+SALES_CANDIDATES = {
+    'inv':          ['INVOICE_NO'],
+    'seller_gstin': ['SELLER_GSTIN'],
+    'buyer_gstin':  ['CUSTOMER_GSTIN'],
+    'seller_name':  ['SELLER_ENTITY'],
+    'buyer_name':   ['BUYER_ENTITY', 'ENTITY'],
+    'taxable':      ['TAXABLE_VALUE'],
+    'tax':          ['TAX_VALUE'],
+    'total':        ['Amount for Reco', 'INVOICE_VALUE'],   # prefer Amount for Reco if present
 }
-WMS = {
-    'inv':          'Invoice_No',
-    'seller_gstin': 'Supplier_GSTIN',
-    'buyer_gstin':  'Entity_GSTIN',
-    'seller_name':  'NEW_SUPPLIER_NAME',
-    'buyer_name':   'Inbound Entity',
-    'taxable':      'Sum of Total_Amt_without_Tax',
-    'tax':          'Sum of Total Tax',
-    'total':        'Sum of Total_Amt_with_Tax',
+WMS_CANDIDATES = {
+    'inv':          ['Invoice_No'],
+    'seller_gstin': ['Supplier_GSTIN', 'Supplier_GSTN'],
+    'buyer_gstin':  ['Entity_GSTIN', 'Entity_GSTN'],
+    'seller_name':  ['NEW_SUPPLIER_NAME', 'Vendor Name'],
+    'buyer_name':   ['Inbound Entity', 'Entity'],
+    'taxable':      ['Sum of Total_Amt_without_Tax'],
+    'tax':          ['Sum of Total Tax', 'ITEM_TAX_VALUE'],
+    'total':        ['Sum of Total_Amt_with_Tax'],
 }
-ZOHO = {
-    'inv':          'Bill Number',
-    'seller_gstin': 'Vendor GSTIN',
-    'buyer_gstin':  'Entity GSTIN',
-    'seller_name':  'Vendor Name',
-    'buyer_name':   'Entity',
-    'taxable':      '_taxable',      # computed
-    'tax':          '_tax',          # computed
-    'total':        'Gross Total',
+ZOHO_CANDIDATES = {
+    'inv':          ['Bill Number'],
+    'seller_gstin': ['Vendor GSTIN'],
+    'buyer_gstin':  ['Entity GSTIN'],
+    'seller_name':  ['Vendor Name'],
+    'buyer_name':   ['Entity'],
+    'taxable':      ['_taxable'],    # always computed
+    'tax':          ['_tax'],        # always computed
+    'total':        ['Gross Total', 'Invoice Total', 'Sum of Item Total'],
 }
+
+# Signatures: subsets of columns that uniquely identify a source
+# Uses OR logic within each group (any one candidate suffices)
+SALES_SIG_REQUIRED  = [['INVOICE_NO'], ['SELLER_GSTIN'], ['CUSTOMER_GSTIN'], ['INVOICE_VALUE', 'Amount for Reco']]
+WMS_SIG_REQUIRED    = [['Invoice_No'], ['Supplier_GSTIN', 'Supplier_GSTN'], ['Entity_GSTIN', 'Entity_GSTN'], ['Sum of Total_Amt_with_Tax']]
+ZOHO_SIG_REQUIRED   = [['Bill Number'], ['Vendor GSTIN'], ['Entity GSTIN'], ['Gross Total', 'Invoice Total', 'Sum of Item Total']]
+
+def find_col(df, *candidates):
+    """Return first candidate that exists in df.columns (stripped), or None."""
+    cols_stripped = {str(c).strip(): str(c) for c in df.columns}
+    for c in candidates:
+        if str(c).strip() in cols_stripped:
+            return cols_stripped[str(c).strip()]
+    return None
+
+def resolve_cols(df, candidates_dict):
+    """Resolve a candidates dict to actual column names present in df."""
+    result = {}
+    for key, options in candidates_dict.items():
+        if key in ('taxable', 'tax') and options[0].startswith('_'):
+            result[key] = options[0]   # computed columns, skip resolution
+            continue
+        resolved = find_col(df, *options)
+        result[key] = resolved  # may be None if not found
+    return result
+
+def matches_signature(df, sig_groups):
+    """Return True if df has at least one column from each required group."""
+    cols_stripped = {str(c).strip() for c in df.columns}
+    for group in sig_groups:
+        if not any(str(c).strip() in cols_stripped for c in group):
+            return False
+    return True
+
+# Legacy dicts kept for backward compat (resolved dynamically in prepare())
+SALES = SALES_CANDIDATES
+WMS   = WMS_CANDIDATES
+ZOHO  = ZOHO_CANDIDATES
 
 COLORS = {
     'hdr_dark':    '1F3864',
@@ -87,8 +123,7 @@ def detect_header_row(ws_or_df_rows):
     return 0
 
 def load_df(file_obj, sheet_name):
-    """Load a sheet, auto-detecting header row."""
-    # First pass to find header row
+    """Load a sheet, auto-detecting header row. Strips column name whitespace."""
     wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
     ws = wb[sheet_name]
     rows = list(ws.iter_rows(min_row=1, max_row=10, values_only=True))
@@ -98,19 +133,19 @@ def load_df(file_obj, sheet_name):
     hdr_idx = detect_header_row(rows)
     df = pd.read_excel(file_obj, sheet_name=sheet_name, header=hdr_idx, engine='openpyxl')
     df = df.dropna(how='all').dropna(axis=1, how='all')
-    # Drop unnamed columns
-    df = df[[c for c in df.columns if not str(c).startswith('Unnamed') and not str(c).strip() in ('.', '')]]
+    # Strip whitespace from column names and drop unnamed/dot columns
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df[[c for c in df.columns if not c.startswith('Unnamed') and c not in ('.', '', 'None')]]
     file_obj.seek(0)
     return df
 
 def identify_source(df):
-    """Return 'Sales', 'WMS', 'Zoho', or None."""
-    cols = set(df.columns.tolist())
-    if SALES_SIGNATURE.issubset(cols):
+    """Return 'Sales', 'WMS', 'Zoho', or None using flexible signature matching."""
+    if matches_signature(df, SALES_SIG_REQUIRED):
         return 'Sales'
-    if WMS_SIGNATURE.issubset(cols):
+    if matches_signature(df, WMS_SIG_REQUIRED):
         return 'WMS'
-    if ZOHO_SIGNATURE.issubset(cols):
+    if matches_signature(df, ZOHO_SIG_REQUIRED):
         return 'Zoho'
     return None
 
@@ -130,29 +165,48 @@ def get_all_sheets_from_file(file_obj):
     return result
 
 def prepare(df, source):
-    """Normalize invoice numbers, add helper columns."""
+    """Normalize invoice numbers, add helper columns. Resolves column names dynamically."""
     df = df.copy()
-    col_map = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[source]
+    candidates = {'Sales': SALES_CANDIDATES, 'WMS': WMS_CANDIDATES, 'Zoho': ZOHO_CANDIDATES}[source]
+    cm = resolve_cols(df, candidates)
+    # Store resolved map on df for downstream use
+    df.attrs['_cm'] = cm
+    df.attrs['_source'] = source
 
-    inv_col = col_map['inv']
+    inv_col        = cm['inv']
+    seller_gstin   = cm['seller_gstin']
+    buyer_gstin    = cm['buyer_gstin']
+
     df['_inv'] = df[inv_col].astype(str).str.upper().str.strip()
     df['_gstin_pair'] = (
-        df[col_map['seller_gstin']].astype(str).str.strip() + '|' +
-        df[col_map['buyer_gstin']].astype(str).str.strip()
+        df[seller_gstin].astype(str).str.strip() + '|' +
+        df[buyer_gstin].astype(str).str.strip()
     )
 
     if source == 'Zoho':
-        igst = pd.to_numeric(df.get('IGST Amount', 0), errors='coerce').fillna(0)
-        cgst = pd.to_numeric(df.get('CGST Amount', 0), errors='coerce').fillna(0)
-        sgst = pd.to_numeric(df.get('SGST Amount', 0), errors='coerce').fillna(0)
-        gross = pd.to_numeric(df.get('Gross Total', 0), errors='coerce').fillna(0)
-        df['_tax']     = (igst + cgst + sgst).round(2)
+        total_col = cm['total']
+        gross = to_num(df[total_col]) if total_col else pd.Series(0, index=df.index)
+        # Try individual tax columns first, then combined
+        igst = to_num(df[find_col(df, 'IGST Amount', 'IGST')]) if find_col(df, 'IGST Amount', 'IGST') else pd.Series(0, index=df.index)
+        cgst = to_num(df[find_col(df, 'CGST Amount', 'CGST')]) if find_col(df, 'CGST Amount', 'CGST') else pd.Series(0, index=df.index)
+        sgst = to_num(df[find_col(df, 'SGST Amount', 'SGST')]) if find_col(df, 'SGST Amount', 'SGST') else pd.Series(0, index=df.index)
+        tax_combined = find_col(df, 'Sum of Tax Amount', 'Tax Amount', 'Total Tax')
+        if igst.sum() + cgst.sum() + sgst.sum() > 0:
+            df['_tax'] = (igst + cgst + sgst).round(2)
+        elif tax_combined:
+            df['_tax'] = to_num(df[tax_combined]).round(2)
+        else:
+            df['_tax'] = pd.Series(0, index=df.index)
         df['_taxable'] = (gross - df['_tax']).round(2)
 
     if source == 'WMS':
         df['_is_pkg'] = df[inv_col].apply(is_packaging)
 
     return df
+
+def get_cm(df):
+    """Retrieve resolved column map stored on df, or raise."""
+    return df.attrs.get('_cm', {})
 
 def to_num(series):
     return pd.to_numeric(series, errors='coerce').fillna(0)
@@ -180,8 +234,8 @@ def run_recon(s1, s1_name, s2, s2_name):
     Returns (matched_df, s1_only_df, s2_only_df).
     matched_df has both sides merged + discrepancy columns.
     """
-    cm1 = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[s1_name]
-    cm2 = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[s2_name]
+    cm1 = get_cm(s1)
+    cm2 = get_cm(s2)
 
     # --- Exact invoice match ---
     s1_inv = set(s1['_inv'])
@@ -304,8 +358,8 @@ def categorize_s2(row, s1_name, s2_name, cm):
 # ─────────────────────────────────────────────
 
 def build_brs(s1, s1_name, s2, s2_name, matched, s1_only, s2_only):
-    cm1 = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[s1_name]
-    cm2 = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[s2_name]
+    cm1 = get_cm(s1)
+    cm2 = get_cm(s2)
 
     s1_tot   = to_num(s1[cm1['total']]).sum()
     s2_tot   = to_num(s2[cm2['total']]).sum()
@@ -378,10 +432,8 @@ def display_cols_for(source, extra=None):
         cols += extra
     return cols
 
-def write_recon_sheet(wb, recon_name, s1_name, s2_name, brs_df, matched, s1_only, s2_only):
+def write_recon_sheet(wb, recon_name, s1_name, s2_name, brs_df, matched, s1_only, s2_only, cm1, cm2):
     ws = wb.create_sheet(title=recon_name[:31])
-    cm1 = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[s1_name]
-    cm2 = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[s2_name]
     row = 1
 
     # ── Title ──
@@ -473,7 +525,7 @@ def create_summary_sheet(wb, results):
                'Value Discrepancies (Count)', 'BRS Difference (₹)', 'Status']
     write_header_row(ws, 4, headers, COLORS['hdr_dark'])
 
-    for i, (name, brs, s1_only, s2_only, matched) in enumerate(results, 5):
+    for i, (name, brs, s1_only, s2_only, matched, *_) in enumerate(results, 5):
         diff      = brs.iloc[6]['Amount (₹)']
         disc_cnt  = len(matched[matched['_discrepancy']]) if len(matched) > 0 else 0
         status    = '✓ Balanced' if abs(float(diff or 0)) < AMOUNT_TOLERANCE else f'⚠ Diff ₹{diff:,.2f}'
@@ -498,13 +550,13 @@ def create_summary_sheet(wb, results):
     autofit_columns(ws)
     ws.freeze_panes = 'A5'
 
-def generate_excel(results, s1_map):
+def generate_excel(results):
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     create_summary_sheet(wb, results)
-    for name, brs, s1_only, s2_only, matched in results:
+    for name, brs, s1_only, s2_only, matched, cm1, cm2 in results:
         s1n, s2n = name.split(' vs ')
-        write_recon_sheet(wb, name, s1n, s2n, brs, matched, s1_only, s2_only)
+        write_recon_sheet(wb, name, s1n, s2n, brs, matched, s1_only, s2_only, cm1, cm2)
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
@@ -588,9 +640,9 @@ def main():
         st.error(f'Could not identify: {", ".join(missing)}. Please check column names match the expected format.')
         with st.expander('Expected column names'):
             c1, c2, c3 = st.columns(3)
-            c1.markdown('**Sales:** ' + ', '.join(SALES_SIGNATURE))
-            c2.markdown('**WMS:** ' + ', '.join(WMS_SIGNATURE))
-            c3.markdown('**Zoho:** ' + ', '.join(ZOHO_SIGNATURE))
+            c1.markdown('**Sales:** INVOICE_NO, SELLER_GSTIN, CUSTOMER_GSTIN, INVOICE_VALUE or Amount for Reco')
+            c2.markdown('**WMS:** Invoice_No, Supplier_GSTIN/GSTN, Entity_GSTIN/GSTN, Sum of Total_Amt_with_Tax')
+            c3.markdown('**Zoho:** Bill Number, Vendor GSTIN, Entity GSTIN, Gross Total or Invoice Total')
         return
 
     with st.spinner('Preparing data…'):
@@ -619,7 +671,7 @@ def main():
         status_text.text(f'Running {s1n} vs {s2n}…')
         matched, s1_only, s2_only = run_recon(s1, s1n, s2, s2n)
         brs = build_brs(s1, s1n, s2, s2n, matched, s1_only, s2_only)
-        results.append((f'{s1n} vs {s2n}', brs, s1_only, s2_only, matched))
+        results.append((f'{s1n} vs {s2n}', brs, s1_only, s2_only, matched, get_cm(s1), get_cm(s2)))
         progress_bar.progress((i + 1) / len(PAIRS))
 
     status_text.empty()
@@ -627,7 +679,7 @@ def main():
     # ── Summary Table ──
     st.subheader('Step 3 — Summary')
     summary_rows = []
-    for name, brs, s1_only, s2_only, matched in results:
+    for name, brs, s1_only, s2_only, matched, _cm1, _cm2 in results:
         diff     = brs.iloc[6]['Amount (₹)']
         disc_cnt = int(matched['_discrepancy'].sum()) if len(matched) > 0 else 0
         summary_rows.append({
@@ -643,7 +695,7 @@ def main():
     st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
     # Metrics row
-    total_s1_only  = sum(len(r[2]) for r in results[:3:2])   # Sales vs WMS, Sales vs Zoho
+    total_s1_only  = sum(len(r[2]) for r in results[:3:2])
     total_s2_only  = sum(len(r[3]) for r in results[:3:2])
     total_disc     = sum(int(r[4]['_discrepancy'].sum()) if len(r[4]) > 0 else 0 for r in results)
     balanced_count = sum(1 for r in results if abs(float(r[1].iloc[6]['Amount (₹)'] or 0)) < AMOUNT_TOLERANCE)
@@ -659,7 +711,7 @@ def main():
     st.subheader('Step 4 — Download Output')
 
     with st.spinner('Building Excel workbook…'):
-        excel_buf = generate_excel(results, None)
+        excel_buf = generate_excel(results)
 
     month_str = datetime.now().strftime('%b_%Y')
     st.download_button(
