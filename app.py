@@ -199,19 +199,33 @@ def run_recon(s1, s1_name, s2, s2_name):
     s1_m = s1_m.drop_duplicates(subset='_inv', keep='first')
     s2_m = s2_m.drop_duplicates(subset='_inv', keep='first')
 
-    merged = s1_m.merge(s2_m, on='_inv', suffixes=(f'__{s1_name}', f'__{s2_name}'))
+    # Rename key columns BEFORE merge so pandas doesn't need to add suffixes
+    # (pandas only adds suffixes to columns present in BOTH dfs — unreliable
+    #  when Sales/WMS/Zoho use different column names for the same concept)
+    s1_m = s1_m.rename(columns={
+        cm1['total']:        '_m_total_s1',
+        cm1['seller_gstin']: '_m_sg_s1',
+        cm1['buyer_gstin']:  '_m_bg_s1',
+        '_gstin_pair':       '_m_gp_s1',
+    })
+    s2_m = s2_m.rename(columns={
+        cm2['total']:        '_m_total_s2',
+        cm2['seller_gstin']: '_m_sg_s2',
+        cm2['buyer_gstin']:  '_m_bg_s2',
+        '_gstin_pair':       '_m_gp_s2',
+    })
+
+    merged = s1_m.merge(s2_m, on='_inv', suffixes=('_s1x', '_s2x'))
 
     # Amount discrepancy check
-    tot1 = to_num(merged[cm1['total'] + f'__{s1_name}'])
-    tot2 = to_num(merged[cm2['total'] + f'__{s2_name}'])
+    tot1 = to_num(merged['_m_total_s1'])
+    tot2 = to_num(merged['_m_total_s2'])
     merged['_amt_diff'] = (tot1 - tot2).round(2)
     merged['_discrepancy'] = merged['_amt_diff'].abs() > AMOUNT_TOLERANCE
     merged['_gstin_diff'] = (
-        merged[cm1['seller_gstin'] + f'__{s1_name}'].astype(str).str.strip() !=
-        merged[cm2['seller_gstin'] + f'__{s2_name}'].astype(str).str.strip()
+        merged['_m_sg_s1'].astype(str).str.strip() != merged['_m_sg_s2'].astype(str).str.strip()
     ) | (
-        merged[cm1['buyer_gstin'] + f'__{s1_name}'].astype(str).str.strip() !=
-        merged[cm2['buyer_gstin'] + f'__{s2_name}'].astype(str).str.strip()
+        merged['_m_bg_s1'].astype(str).str.strip() != merged['_m_bg_s2'].astype(str).str.strip()
     )
 
     # S1 only
@@ -300,8 +314,8 @@ def build_brs(s1, s1_name, s2, s2_name, matched, s1_only, s2_only):
 
     # Matched value diff (S2 matched total - S1 matched total)
     if len(matched) > 0:
-        m_s1_tot = to_num(matched[cm1['total'] + f'__{s1_name}']).sum()
-        m_s2_tot = to_num(matched[cm2['total'] + f'__{s2_name}']).sum()
+        m_s1_tot = to_num(matched['_m_total_s1']).sum()
+        m_s2_tot = to_num(matched['_m_total_s2']).sum()
         matched_val_diff = m_s2_tot - m_s1_tot
     else:
         matched_val_diff = 0
@@ -431,13 +445,13 @@ def write_recon_sheet(wb, recon_name, s1_name, s2_name, brs_df, matched, s1_only
             ws.cell(row=row, column=1,
                     value=f'Matched — Discrepancies — {len(disc)} invoices').font = Font(bold=True, size=11, color='FF0000')
             row += 1
-            tot1_col = cm1['total'] + f'__{s1_name}'
-            tot2_col = cm2['total'] + f'__{s2_name}'
+            tot1_col = '_m_total_s1'
+            tot2_col = '_m_total_s2'
             inv_col  = '_inv'
-            sg1 = cm1['seller_gstin'] + f'__{s1_name}'
-            sg2 = cm2['seller_gstin'] + f'__{s2_name}'
-            bg1 = cm1['buyer_gstin'] + f'__{s1_name}'
-            bg2 = cm2['buyer_gstin'] + f'__{s2_name}'
+            sg1 = '_m_sg_s1'
+            sg2 = '_m_sg_s2'
+            bg1 = '_m_bg_s1'
+            bg2 = '_m_bg_s2'
 
             show_cols = [c for c in [inv_col, sg1, sg2, bg1, bg2, tot1_col, tot2_col, '_amt_diff', '_gstin_diff'] if c in disc.columns]
             write_header_row(ws, row, show_cols, COLORS['hdr_mid'])
