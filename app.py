@@ -423,11 +423,13 @@ def autofit_columns(ws, max_width=45):
         max_len = max((len(str(cell.value or '')) for cell in col if cell.value), default=8)
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 3, max_width)
 
-def display_cols_for(source, extra=None):
-    cm = {'Sales': SALES, 'WMS': WMS, 'Zoho': ZOHO}[source]
-    cols = [cm['inv'], cm['seller_gstin'], cm['buyer_gstin'],
-            cm['seller_name'], cm['buyer_name'],
-            cm['taxable'], cm['tax'], cm['total']]
+def display_cols_for(cm, extra=None):
+    """Return display columns from a resolved column map (string values, not candidates lists)."""
+    cols = [v for v in [
+        cm.get('inv'), cm.get('seller_gstin'), cm.get('buyer_gstin'),
+        cm.get('seller_name'), cm.get('buyer_name'),
+        cm.get('taxable'), cm.get('tax'), cm.get('total')
+    ] if v and not str(v).startswith('_')]  # skip computed _taxable / _tax
     if extra:
         cols += extra
     return cols
@@ -470,10 +472,10 @@ def write_recon_sheet(wb, recon_name, s1_name, s2_name, brs_df, matched, s1_only
         ws.cell(row=row, column=1,
                 value=f'In {s1_name} Only — {len(s1_only)} invoices  |  Total: ₹{s1o_total:,.2f}').font = Font(bold=True, size=11, color=COLORS['hdr_dark'])
         row += 1
-        show = [c for c in display_cols_for(s1_name) + ['_category'] if c in s1_only.columns]
+        show = [c for c in display_cols_for(cm1) + ['_category'] if c in s1_only.columns]
         write_header_row(ws, row, show, COLORS['hdr_mid'])
         row += 1
-        num_pos = [i + 1 for i, c in enumerate(show) if c in (cm1['taxable'], cm1['tax'], cm1['total'])]
+        num_pos = [i + 1 for i, c in enumerate(show) if c in (cm1.get('taxable'), cm1.get('tax'), cm1.get('total'))]
         row = write_df_to_ws(ws, s1_only[show], row, fill_color=COLORS['orange'], number_cols=num_pos)
         row += 2
 
@@ -483,10 +485,10 @@ def write_recon_sheet(wb, recon_name, s1_name, s2_name, brs_df, matched, s1_only
         ws.cell(row=row, column=1,
                 value=f'In {s2_name} Only — {len(s2_only)} invoices  |  Total: ₹{s2o_total:,.2f}').font = Font(bold=True, size=11, color=COLORS['hdr_dark'])
         row += 1
-        show = [c for c in display_cols_for(s2_name) + ['_category'] if c in s2_only.columns]
+        show = [c for c in display_cols_for(cm2) + ['_category'] if c in s2_only.columns]
         write_header_row(ws, row, show, COLORS['hdr_mid'])
         row += 1
-        num_pos = [i + 1 for i, c in enumerate(show) if c in (cm2['taxable'], cm2['tax'], cm2['total'])]
+        num_pos = [i + 1 for i, c in enumerate(show) if c in (cm2.get('taxable'), cm2.get('tax'), cm2.get('total'))]
         row = write_df_to_ws(ws, s2_only[show], row, fill_color=COLORS['blue_light'], number_cols=num_pos)
         row += 2
 
