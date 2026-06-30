@@ -367,8 +367,28 @@ def render_table(df, cm, height=400):
     st.dataframe(display_df, use_container_width=True, height=height, hide_index=True)
 
 # ─────────────────────────────────────────────
-# EXCEL EXPORT
+# EXCEL EXPORT — 4-SHEET FORMAT
 # ─────────────────────────────────────────────
+
+# Lookup block columns per other source (matches Format.xlsx exactly)
+LOOKUP_FIELDS = [
+    ('entity',        'Entity Name'),
+    ('vendor',        'Vendor Name'),
+    ('taxable',       'Taxable value'),
+    ('tax',           'Tax Value'),
+    ('total',         'Total Value'),
+    ('entity_check',  'Entity Check'),
+    ('vendor_check',  'Vendor Check'),
+    ('taxable_diff',  'Taxable value Diff'),
+    ('tax_diff',      'Tax Value Diff'),
+    ('total_diff',    'Total Value Diff'),
+    ('remark',        'Remark'),
+    ('notes',         'Notes'),
+]
+N_LOOKUP = len(LOOKUP_FIELDS)   # 12 columns per other source block
+
+# Append-row colors per other source index
+APPEND_COLORS = ['FCE4D6', 'DDEBF7', 'E2EFDA']
 
 def apply_fill(ws, row, c1, c2, color):
     fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
@@ -383,7 +403,7 @@ def write_hdr(ws, row, labels, color, font_color='FFFFFF'):
         cell.font = Font(color=font_color, bold=True)
         cell.alignment = Alignment(horizontal='center', wrap_text=True)
 
-def write_rows(ws, df, start, fill_color=None, num_cols=None):
+def write_rows_df(ws, df, start, fill_color=None, num_cols=None):
     num_cols = num_cols or []
     fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type='solid') if fill_color else None
     for ri, (_, row) in enumerate(df.iterrows()):
@@ -400,51 +420,45 @@ def autofit(ws):
         w = max((len(str(c.value or '')) for c in col if c.value), default=8)
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(w + 3, 45)
 
-def build_excel(results):
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
+# ── Summary & Analysis sheet ──────────────────────────────────────────────────
 
-    # Summary sheet
-    ws = wb.create_sheet('Summary', 0)
+def _write_summary(ws, src_items, result_map):
     ws.cell(1, 1, 'Ecosystem Purchase Recon — Monthly Summary').font = Font(
         bold=True, size=14, color=COLORS['hdr_dark'])
-    ws.cell(2, 1, f'Generated: {datetime.now().strftime("%d-%b-%Y %H:%M")}').font = Font(
-        italic=True, size=9)
-    hdrs = ['Recon', 'S1 Total (₹)', 'S2 Total (₹)', 'S1 Only', 'S2 Only',
-            'Discrepancies', 'Difference (₹)', 'Status']
-    write_hdr(ws, 4, hdrs, COLORS['hdr_dark'])
-    for i, (name, brs, s1_only, s2_only, matched, cm1, cm2) in enumerate(results, 5):
-        diff = brs.iloc[6]['Amount (₹)']
-        disc = int(matched['_discrepancy'].sum()) if len(matched) > 0 else 0
-        vals = [
-            name,
-            brs.iloc[0]['Amount (₹)'], brs.iloc[5]['Amount (₹)'],
-            len(s1_only), len(s2_only), disc, float(diff),
-            '✓ Balanced' if abs(float(diff or 0)) < AMOUNT_TOLERANCE else f'⚠ ₹{diff:,.2f}',
-        ]
-        for c, v in enumerate(vals, 1):
-            cell = ws.cell(i, c, v)
-            if c in (2, 3, 7):
+    ws.cell(2, 1, f'Generated: {datetime.now().strftime("%d-%b-%Y %H:%M")}').font = Font(italic=True, size=9)
+
+    r = 4
+
+    # ── Source stats ──────────────────────────
+    ws.cell(r, 1, 'SOURCE SUMMARY').font = Font(bold=True, size=11, color=COLORS['hdr_dark'])
+    r += 1
+    write_hdr(ws, r, ['Source', 'Type', 'Rows', 'Invoice Total (₹)'], COLORS['hdr_dark'])
+    r += 1
+    for _, (src_name, src_type, src_df) in src_items:
+        src_cm = get_cm(src_df)
+        tc = src_cm.get('total')
+        total = to_num(src_df[tc]).sum() if tc and tc in src_df.columns else 0
+        for c, v in enumerate([src_name, src_type, len(src_df), round(total, 2)], 1):
+            cell = ws.cell(r, c, v)
+            if c == 4:
                 cell.number_format = '#,##0.00'
-        clr = COLORS['balanced'] if abs(float(diff or 0)) < AMOUNT_TOLERANCE else COLORS['unbalanced']
-        apply_fill(ws, i, 8, 8, clr)
-    autofit(ws)
-    ws.freeze_panes = 'A5'
-
-    # One sheet per recon combination
-    for name, brs, s1_only, s2_only, matched, cm1, cm2 in results:
-        s1n, s2n = name.split(' vs ')
-        ws = wb.create_sheet(name[:31])
-        r = 1
-
-        ws.cell(r, 1, f'BRS: {name}').font = Font(bold=True, size=13, color=COLORS['hdr_dark'])
-        ws.cell(r + 1, 1, f'Generated: {datetime.now().strftime("%d-%b-%Y %H:%M")}').font = Font(
-            italic=True, size=9)
-        r += 3
-
-        ws.cell(r, 1, 'RECONCILIATION STATEMENT').font = Font(bold=True, size=11)
         r += 1
-        write_hdr(ws, r, list(brs.columns), COLORS['hdr_dark'])
+    r += 2
+
+    # ── BRS tables ────────────────────────────
+    ws.cell(r, 1, 'RECONCILIATION STATEMENTS (BRS)').font = Font(
+        bold=True, size=11, color=COLORS['hdr_dark'])
+    r += 1
+
+    for pair_name, (brs, s1_only, s2_only, matched, cm1, cm2) in result_map.items():
+        diff_v = float(brs.iloc[6]['Amount (₹)'] or 0)
+        status = '✓ Balanced' if abs(diff_v) < AMOUNT_TOLERANCE else f'⚠ Diff ₹{diff_v:,.2f}'
+
+        ws.cell(r, 1, f'► {pair_name}  —  {status}').font = Font(
+            bold=True, size=10,
+            color='375623' if abs(diff_v) < AMOUNT_TOLERANCE else 'C00000')
+        r += 1
+        write_hdr(ws, r, list(brs.columns), COLORS['hdr_mid'])
         r += 1
         for _, brow in brs.iterrows():
             for c, val in enumerate(brow, 1):
@@ -457,60 +471,424 @@ def build_excel(results):
                 ws.cell(r, 1).font = Font(bold=True)
                 ws.cell(r, 3).font = Font(bold=True)
             if lbl == 'Difference':
-                diff_v = brow['Amount (₹)']
+                dv = brow['Amount (₹)']
                 apply_fill(ws, r, 1, 4,
-                           COLORS['balanced'] if abs(float(diff_v or 0)) < AMOUNT_TOLERANCE
+                           COLORS['balanced'] if abs(float(dv or 0)) < AMOUNT_TOLERANCE
                            else COLORS['unbalanced'])
                 ws.cell(r, 1).font = Font(bold=True)
             r += 1
         r += 2
 
-        if len(s1_only) > 0:
-            tc1 = cm1.get('total', '')
-            tot = to_num(s1_only[tc1]).sum() if tc1 and tc1 in s1_only.columns else 0
-            ws.cell(r, 1, f'In {s1n} Only — {len(s1_only)} invoices | ₹{tot:,.2f}').font = Font(
-                bold=True, size=11, color=COLORS['hdr_dark'])
-            r += 1
-            show = display_cols(cm1, s1_only) + (['_category'] if '_category' in s1_only.columns else [])
-            write_hdr(ws, r, show, COLORS['hdr_mid'])
-            r += 1
-            num_p = [i + 1 for i, c in enumerate(show)
-                     if c in (cm1.get('taxable'), cm1.get('tax'), cm1.get('total'))]
-            r = write_rows(ws, s1_only[show], r, COLORS['orange'], num_p)
-            r += 2
-
-        if len(s2_only) > 0:
-            tc2 = cm2.get('total', '')
-            tot = to_num(s2_only[tc2]).sum() if tc2 and tc2 in s2_only.columns else 0
-            ws.cell(r, 1, f'In {s2n} Only — {len(s2_only)} invoices | ₹{tot:,.2f}').font = Font(
-                bold=True, size=11, color=COLORS['hdr_dark'])
-            r += 1
-            show = display_cols(cm2, s2_only) + (['_category'] if '_category' in s2_only.columns else [])
-            write_hdr(ws, r, show, COLORS['hdr_mid'])
-            r += 1
-            num_p = [i + 1 for i, c in enumerate(show)
-                     if c in (cm2.get('taxable'), cm2.get('tax'), cm2.get('total'))]
-            r = write_rows(ws, s2_only[show], r, COLORS['blue_light'], num_p)
-            r += 2
-
-        if len(matched) > 0:
-            disc = matched[matched['_discrepancy'] | matched['_gstin_diff']].copy()
-            if len(disc) > 0:
-                ws.cell(r, 1, f'Discrepancies — {len(disc)} invoices').font = Font(
-                    bold=True, size=11, color='FF0000')
+    # ── Exception analysis ────────────────────
+    ws.cell(r, 1, 'EXCEPTION ANALYSIS').font = Font(bold=True, size=11, color=COLORS['hdr_dark'])
+    r += 1
+    write_hdr(ws, r, ['Recon', 'Side', 'Category', 'Count', 'Total Value (₹)'], COLORS['hdr_dark'])
+    r += 1
+    for pair_name, (brs, s1_only, s2_only, matched, cm1, cm2) in result_map.items():
+        s1n, s2n = pair_name.split(' vs ')
+        for side_df, side_label, cm in [
+            (s1_only, f'In {s1n} only', cm1),
+            (s2_only, f'In {s2n} only', cm2),
+        ]:
+            if len(side_df) == 0:
+                continue
+            tc = cm.get('total')
+            for cat, grp in side_df.groupby('_category'):
+                tot = to_num(grp[tc]).sum() if tc and tc in grp.columns else 0
+                for c, v in enumerate([pair_name, side_label, cat, len(grp), round(tot, 2)], 1):
+                    cell = ws.cell(r, c, v)
+                    if c == 5:
+                        cell.number_format = '#,##0.00'
                 r += 1
-                disc_cols = [c for c in [
-                    '_inv', '_m_sg_s1', '_m_sg_s2', '_m_bg_s1', '_m_bg_s2',
-                    '_m_total_s1', '_m_total_s2', '_amt_diff', '_gstin_diff',
-                ] if c in disc.columns]
-                write_hdr(ws, r, disc_cols, COLORS['hdr_mid'])
-                r += 1
-                num_p = [i + 1 for i, c in enumerate(disc_cols)
-                         if 'total' in c or 'diff' in c]
-                r = write_rows(ws, disc[disc_cols], r, COLORS['yellow'], num_p)
 
-        autofit(ws)
-        ws.freeze_panes = 'A4'
+    # ── Discrepancy summary ───────────────────
+    r += 1
+    ws.cell(r, 1, 'VALUE DISCREPANCIES (Matched Invoices with Amount Diff)').font = Font(
+        bold=True, size=11, color=COLORS['hdr_dark'])
+    r += 1
+    write_hdr(ws, r, ['Recon', 'Invoice No.', 'S1 Total (₹)', 'S2 Total (₹)', 'Diff (₹)', 'GSTIN Mismatch'],
+              COLORS['hdr_dark'])
+    r += 1
+    for pair_name, (brs, s1_only, s2_only, matched, cm1, cm2) in result_map.items():
+        if len(matched) == 0:
+            continue
+        disc = matched[matched['_discrepancy'] | matched['_gstin_diff']]
+        for _, dr in disc.iterrows():
+            vals = [
+                pair_name,
+                dr.get('_inv', ''),
+                dr.get('_m_total_s1', ''),
+                dr.get('_m_total_s2', ''),
+                dr.get('_amt_diff', ''),
+                'Yes' if dr.get('_gstin_diff') else 'No',
+            ]
+            for c, v in enumerate(vals, 1):
+                cell = ws.cell(r, c, v)
+                if c in (3, 4, 5) and isinstance(v, (int, float)):
+                    cell.number_format = '#,##0.00'
+                    if c == 5 and isinstance(v, float) and abs(v) > AMOUNT_TOLERANCE:
+                        cell.font = Font(color='C00000', bold=True)
+            r += 1
+
+    autofit(ws)
+    ws.freeze_panes = 'A4'
+
+
+# ── Source data sheet ─────────────────────────────────────────────────────────
+
+def _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map):
+    """
+    Build source sheet:
+      Row 1 : group span headers ("As per <OtherName>")
+      Row 2 : row counts / totals
+      Row 3 : column headers
+      Row 4+ : source rows with lookup columns filled, exception rows highlighted
+      Bottom : other-source-only rows appended per other source (different color)
+    """
+    own_cols = display_cols(src_cm, src_df)
+    if not own_cols:
+        own_cols = [c for c in [src_cm.get('inv'), src_cm.get('total')] if c]
+
+    n_own = len(own_cols)
+
+    # Pre-build lookup data for each other source (vectorized merges)
+    lookup_info = []
+    for other_info in others:
+        other_name = other_info['name']
+        other_df   = other_info['df']
+        other_cm   = other_info['cm']
+        prefix     = other_name[0].upper()
+
+        # Get recon results for this src-other pair
+        pair_key = f'{src_name} vs {other_name}'
+        rev_key  = f'{other_name} vs {src_name}'
+        if pair_key in result_map:
+            _, s1_only, s2_only, matched, _, _ = result_map[pair_key]
+        elif rev_key in result_map:
+            _, s2_only_r, s1_only_r, matched_r, _, _ = result_map[rev_key]
+            s1_only, s2_only = s2_only_r, s1_only_r
+        else:
+            s1_only = pd.DataFrame(columns=['_inv', '_category'])
+            s2_only = pd.DataFrame(columns=['_inv', '_category'])
+
+        cat_map = dict(zip(s1_only['_inv'], s1_only['_category'])) if '_inv' in s1_only.columns else {}
+
+        lookup_info.append({
+            'name':    other_name,
+            'prefix':  prefix,
+            'df':      other_df,
+            'cm':      other_cm,
+            'cat_map': cat_map,
+            's2_only': s2_only,   # rows in other NOT in src → append at bottom
+        })
+
+    # ── Build full output DataFrame (vectorized) ──────────────────────────────
+    output = src_df[own_cols + ['_inv']].copy()
+
+    for li in lookup_info:
+        other_df  = li['df']
+        other_cm  = li['cm']
+        prefix    = li['prefix']
+        cat_map   = li['cat_map']
+
+        # Slim other df for merge
+        o_fields = {
+            'buyer_name':  f'{prefix}_Entity',
+            'seller_name': f'{prefix}_Vendor',
+            'taxable':     f'{prefix}_Taxable',
+            'tax':         f'{prefix}_Tax',
+            'total':       f'{prefix}_Total',
+        }
+        slim_cols = ['_inv']
+        rename_m  = {}
+        for fkey, new_name in o_fields.items():
+            col = other_cm.get(fkey)
+            if col and col in other_df.columns and col not in slim_cols:
+                slim_cols.append(col)
+                rename_m[col] = new_name
+
+        other_slim = (other_df[slim_cols]
+                      .drop_duplicates(subset='_inv')
+                      .rename(columns=rename_m))
+
+        output = output.merge(other_slim, on='_inv', how='left')
+
+        # Vectorized checks
+        s_buy  = src_cm.get('buyer_name')
+        s_sell = src_cm.get('seller_name')
+        s_tax  = src_cm.get('taxable')
+        s_txv  = src_cm.get('tax')
+        s_tot  = src_cm.get('total')
+
+        pe = f'{prefix}_Entity'
+        pv = f'{prefix}_Vendor'
+        pt = f'{prefix}_Taxable'
+        px = f'{prefix}_Tax'
+        po = f'{prefix}_Total'
+
+        if s_buy and s_buy in output.columns and pe in output.columns:
+            output[f'{prefix}_Entity_Check'] = np.where(
+                output[pe].isna(), '',
+                np.where(output[s_buy].astype(str).str.strip() == output[pe].astype(str).str.strip(),
+                         'Match', 'Mismatch')
+            )
+        else:
+            output[f'{prefix}_Entity_Check'] = ''
+
+        if s_sell and s_sell in output.columns and pv in output.columns:
+            output[f'{prefix}_Vendor_Check'] = np.where(
+                output[pv].isna(), '',
+                np.where(output[s_sell].astype(str).str.strip() == output[pv].astype(str).str.strip(),
+                         'Match', 'Mismatch')
+            )
+        else:
+            output[f'{prefix}_Vendor_Check'] = ''
+
+        for s_col, o_col, diff_name in [
+            (s_tax, pt, f'{prefix}_Taxable_Diff'),
+            (s_txv, px, f'{prefix}_Tax_Diff'),
+            (s_tot, po, f'{prefix}_Total_Diff'),
+        ]:
+            if s_col and s_col in output.columns and o_col in output.columns:
+                diff_series = to_num(output[s_col]) - to_num(output[o_col])
+                output[diff_name] = diff_series.where(output[o_col].notna()).round(2)
+            else:
+                output[diff_name] = np.nan
+
+        # Remark from category map (only for src-only rows — unmatched)
+        output[f'{prefix}_Remark'] = output['_inv'].map(cat_map).fillna('')
+        output[f'{prefix}_Notes']  = ''
+
+    # Build ordered write-column list
+    write_cols = own_cols.copy()
+    group_start_cols = []  # 1-based column index where each lookup block starts
+
+    for li in lookup_info:
+        write_cols.append(None)         # visual separator col (empty)
+        group_start_cols.append(len(write_cols) + 1)
+        prefix = li['prefix']
+        for f_key, _ in LOOKUP_FIELDS:
+            field_col_map = {
+                'entity':        f'{prefix}_Entity',
+                'vendor':        f'{prefix}_Vendor',
+                'taxable':       f'{prefix}_Taxable',
+                'tax':           f'{prefix}_Tax',
+                'total':         f'{prefix}_Total',
+                'entity_check':  f'{prefix}_Entity_Check',
+                'vendor_check':  f'{prefix}_Vendor_Check',
+                'taxable_diff':  f'{prefix}_Taxable_Diff',
+                'tax_diff':      f'{prefix}_Tax_Diff',
+                'total_diff':    f'{prefix}_Total_Diff',
+                'remark':        f'{prefix}_Remark',
+                'notes':         f'{prefix}_Notes',
+            }
+            write_cols.append(field_col_map[f_key])
+
+    total_cols = len(write_cols)
+
+    # ── Row 1: Group span headers ─────────────────────────────────────────────
+    r = 1
+    # Own source label
+    c1 = ws.cell(r, 1, src_name)
+    c1.font = Font(bold=True, size=12, color='FFFFFF')
+    c1.fill = PatternFill(start_color=COLORS['hdr_dark'], end_color=COLORS['hdr_dark'], fill_type='solid')
+    c1.alignment = Alignment(horizontal='center')
+    try:
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=n_own)
+    except Exception:
+        pass
+
+    for i, (li, gc) in enumerate(zip(lookup_info, group_start_cols)):
+        end_c = gc + N_LOOKUP - 1
+        cell  = ws.cell(r, gc, f'As per {li["name"]}')
+        cell.font = Font(bold=True, size=11, color='FFFFFF')
+        cell.fill = PatternFill(start_color=COLORS['hdr_mid'], end_color=COLORS['hdr_mid'], fill_type='solid')
+        cell.alignment = Alignment(horizontal='center')
+        try:
+            ws.merge_cells(start_row=r, start_column=gc, end_row=r, end_column=end_c)
+        except Exception:
+            pass
+
+    # ── Row 2: Counts/totals ──────────────────────────────────────────────────
+    r = 2
+    tc_src = src_cm.get('total')
+    src_tot = to_num(src_df[tc_src]).sum() if tc_src and tc_src in src_df.columns else 0
+    ws.cell(r, 1, f'{len(src_df):,} rows  |  Total: ₹{src_tot:,.2f}').font = Font(italic=True, size=9)
+
+    for li, gc in zip(lookup_info, group_start_cols):
+        o_tc  = li['cm'].get('total')
+        o_tot = to_num(li['df'][o_tc]).sum() if o_tc and o_tc in li['df'].columns else 0
+        n_matched  = len(li['df']) - len(li['s2_only'])
+        n_src_only = len(li['cat_map'])
+        ws.cell(r, gc,
+                f'Matched: {n_matched:,}  |  Only in {li["name"]}: {len(li["s2_only"]):,}  '
+                f'|  Only in {src_name}: {n_src_only:,}  |  {li["name"]} Total: ₹{o_tot:,.2f}'
+               ).font = Font(italic=True, size=9)
+
+    # ── Row 3: Column headers ─────────────────────────────────────────────────
+    r = 3
+    for c_idx, col_name in enumerate(own_cols, 1):
+        cell = ws.cell(r, c_idx, col_name)
+        cell.fill = PatternFill(start_color=COLORS['hdr_dark'], end_color=COLORS['hdr_dark'], fill_type='solid')
+        cell.font = Font(bold=True, color='FFFFFF')
+        cell.alignment = Alignment(horizontal='center', wrap_text=True)
+
+    for li, gc in zip(lookup_info, group_start_cols):
+        prefix = li['prefix']
+        for f_idx, (_, f_label) in enumerate(LOOKUP_FIELDS):
+            cell = ws.cell(r, gc + f_idx, f'{prefix}_{f_label}')
+            cell.fill = PatternFill(start_color=COLORS['hdr_mid'], end_color=COLORS['hdr_mid'], fill_type='solid')
+            cell.font = Font(bold=True, color='FFFFFF')
+            cell.alignment = Alignment(horizontal='center', wrap_text=True)
+
+    # ── Data rows ─────────────────────────────────────────────────────────────
+    r = 4
+
+    # Identify remark columns for exception detection
+    remark_cols = [f'{li["prefix"]}_Remark' for li in lookup_info
+                   if f'{li["prefix"]}_Remark' in output.columns]
+
+    # Build exception mask (vectorized)
+    if remark_cols:
+        exc_mask = output[remark_cols].ne('').any(axis=1)
+    else:
+        exc_mask = pd.Series(False, index=output.index)
+
+    # Write all data rows using ws.append (fast)
+    fill_exc  = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+    fill_none = None
+
+    for row_idx, (_, src_row) in enumerate(output.iterrows()):
+        row_vals = []
+        for col in write_cols:
+            if col is None:
+                row_vals.append('')
+            elif col in output.columns:
+                val = src_row[col]
+                row_vals.append('' if pd.isna(val) else val)
+            else:
+                row_vals.append('')
+        ws.append(row_vals)
+
+        # Color exception rows (unmatched in any other source)
+        if exc_mask.iloc[row_idx]:
+            for c in range(1, total_cols + 1):
+                ws.cell(r, c).fill = fill_exc
+
+        # Number format for amount/diff columns
+        for c_idx, col in enumerate(write_cols, 1):
+            if col and ('Total' in str(col) or 'Diff' in str(col) or
+                        col in [src_cm.get('taxable'), src_cm.get('tax'), src_cm.get('total')]):
+                cell = ws.cell(r, c_idx)
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = '#,##0.00'
+        r += 1
+
+    # ── Appended rows (other-source only) ─────────────────────────────────────
+    for g_idx, li in enumerate(lookup_info):
+        s2_only = li['s2_only']
+        if len(s2_only) == 0:
+            continue
+
+        fill_clr = APPEND_COLORS[g_idx % len(APPEND_COLORS)]
+        o_cm     = li['cm']
+        o_tc     = o_cm.get('total')
+        o_tot    = to_num(s2_only[o_tc]).sum() if o_tc and o_tc in s2_only.columns else 0
+
+        # Separator row
+        sep_cell = ws.cell(r, 1,
+                           f'▼  In {li["name"]} Only — not in {src_name}  '
+                           f'({len(s2_only):,} invoices | ₹{o_tot:,.2f})')
+        sep_cell.font = Font(bold=True, size=10, color=COLORS['hdr_dark'])
+        apply_fill(ws, r, 1, total_cols, fill_clr)
+        r += 1
+
+        fill_app = PatternFill(start_color=fill_clr, end_color=fill_clr, fill_type='solid')
+
+        for _, o_row in s2_only.iterrows():
+            row_vals = []
+            for col in write_cols:
+                if col is None:
+                    row_vals.append('')
+                elif col.startswith(li['prefix'] + '_'):
+                    # This block: fill from the other source row
+                    fkey = col[len(li['prefix']) + 1:].lower().replace(' ', '_')
+                    field_to_cm_key = {
+                        'entity':       'buyer_name',
+                        'vendor':       'vendor_name',  # will miss, fallback below
+                        'taxable':      'taxable',
+                        'tax':          'tax',
+                        'total':        'total',
+                        'entity_check': None,
+                        'vendor_check': None,
+                        'taxable_diff': None,
+                        'tax_diff':     None,
+                        'total_diff':   None,
+                        'remark':       '_category',
+                        'notes':        None,
+                    }
+                    # map col → other_cm field
+                    if col == f'{li["prefix"]}_Entity':
+                        bc = o_cm.get('buyer_name')
+                        row_vals.append(str(o_row[bc]) if bc and bc in o_row.index else '')
+                    elif col == f'{li["prefix"]}_Vendor':
+                        sc = o_cm.get('seller_name')
+                        row_vals.append(str(o_row[sc]) if sc and sc in o_row.index else '')
+                    elif col == f'{li["prefix"]}_Taxable':
+                        tc = o_cm.get('taxable')
+                        row_vals.append(o_row[tc] if tc and tc in o_row.index else '')
+                    elif col == f'{li["prefix"]}_Tax':
+                        tc = o_cm.get('tax')
+                        row_vals.append(o_row[tc] if tc and tc in o_row.index else '')
+                    elif col == f'{li["prefix"]}_Total':
+                        tc = o_cm.get('total')
+                        row_vals.append(o_row[tc] if tc and tc in o_row.index else '')
+                    elif col == f'{li["prefix"]}_Remark':
+                        row_vals.append(o_row.get('_category', ''))
+                    else:
+                        row_vals.append('')
+                else:
+                    row_vals.append('')  # own cols and other-group cols: blank
+
+            ws.append(row_vals)
+            for c in range(1, total_cols + 1):
+                ws.cell(r, c).fill = fill_app
+            r += 1
+
+    autofit(ws)
+    ws.freeze_panes = f'{get_column_letter(min(5, n_own))}4'
+
+
+# ── Main entry point ──────────────────────────────────────────────────────────
+
+def build_excel(prepared, results):
+    """
+    4-sheet format:
+      Sheet 1 : Summary & Analysis  (BRS + exception analysis + discrepancies)
+      Sheet 2+ : One per source      (own data + lookup from others + appended)
+    """
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+
+    src_items  = list(prepared.items())   # [(key, (name, type, df)), ...]
+    result_map = {
+        name: (brs, s1_only, s2_only, matched, cm1, cm2)
+        for name, brs, s1_only, s2_only, matched, cm1, cm2 in results
+    }
+
+    # Sheet 1: Summary & Analysis
+    ws_sum = wb.create_sheet('Summary & Analysis', 0)
+    _write_summary(ws_sum, src_items, result_map)
+
+    # Source sheets
+    for i, (src_key, (src_name, src_type, src_df)) in enumerate(src_items):
+        src_cm = get_cm(src_df)
+        others = [
+            {'name': on, 'type': ot, 'df': od, 'cm': get_cm(od)}
+            for j, (ok, (on, ot, od)) in enumerate(src_items) if j != i
+        ]
+        ws = wb.create_sheet(src_name[:31])
+        _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map)
 
     buf = BytesIO()
     wb.save(buf)
@@ -957,7 +1335,7 @@ def main():
     # ── DOWNLOAD ─────────────────────────────────
     st.divider()
     with st.spinner('Building Excel…'):
-        excel_buf = build_excel(results)
+        excel_buf = build_excel(prepared, results)
     st.download_button(
         label='📥 Download Recon Output (.xlsx)',
         data=excel_buf,
