@@ -344,6 +344,23 @@ def style_brs(brs_df):
         return [''] * len(row)
     return brs_df.style.apply(row_style, axis=1).format({'Amount (₹)': '{:,.2f}'})
 
+# Category → highlight color for exception table rows
+CATEGORY_ROW_COLORS = {
+    'Goods in Transit':       '#FCE4D6',
+    'GRN Done':               '#DDEBF7',
+    'Packing Material':       '#FFE699',
+    'Not Booked in Zoho':     '#FFC7CE',
+    'Prior Month':            '#E2EFDA',
+    'Booked in Zoho':         '#DDEBF7',
+    'Invoice No. Mismatch':   '#D9D9D9',
+}
+
+def _cat_color(cat_val):
+    for kw, color in CATEGORY_ROW_COLORS.items():
+        if kw.lower() in str(cat_val).lower():
+            return color
+    return None
+
 def render_table(df, cm, height=400):
     show = display_cols(cm, df)
     if '_category' in df.columns:
@@ -364,7 +381,24 @@ def render_table(df, cm, height=400):
         '_category':            'Category / Reason',
     }
     display_df = df[show].rename(columns={k: v for k, v in rename_map.items() if k and k in show})
-    st.dataframe(display_df, use_container_width=True, height=height, hide_index=True)
+
+    # Fix Arrow serialization: convert object/mixed-type columns to string
+    for col in display_df.columns:
+        if display_df[col].dtype == object or str(display_df[col].dtype) in ('object', 'string'):
+            display_df[col] = display_df[col].fillna('').astype(str).replace('nan', '')
+
+    # Apply category row colors if _category column is present (now renamed)
+    cat_col = 'Category / Reason'
+    if cat_col in display_df.columns:
+        def row_color(row):
+            color = _cat_color(row[cat_col])
+            if color:
+                return [f'background-color:{color}'] * len(row)
+            return [''] * len(row)
+        styled = display_df.style.apply(row_color, axis=1)
+        st.dataframe(styled, use_container_width=True, height=height, hide_index=True)
+    else:
+        st.dataframe(display_df, use_container_width=True, height=height, hide_index=True)
 
 # ─────────────────────────────────────────────
 # EXCEL EXPORT — 4-SHEET FORMAT
@@ -900,7 +934,7 @@ def build_excel(prepared, results):
 # COLUMN MAPPER WIDGET
 # ─────────────────────────────────────────────
 
-def column_mapper_ui(source_key, df, default_name='Source'):
+def column_mapper_ui(source_key, df, default_name='Source', default_type=None):
     """Render sheet column mapper. Returns (src_name, src_type, cm)."""
     cols = list(df.columns)
     none_opt = '— Not mapped —'
@@ -924,10 +958,15 @@ def column_mapper_ui(source_key, df, default_name='Source'):
             help='Give this source a short name, e.g. Sales, WMS, Zoho Books',
         )
     with c_right:
+        _type_default = (
+            SOURCE_TYPES.index(saved['type'])   if saved.get('type') in SOURCE_TYPES
+            else SOURCE_TYPES.index(default_type) if default_type in SOURCE_TYPES
+            else 0
+        )
         src_type = st.selectbox(
             'Source type',
             SOURCE_TYPES,
-            index=SOURCE_TYPES.index(saved['type']) if saved.get('type') in SOURCE_TYPES else 0,
+            index=_type_default,
             key=f'type_{source_key}',
             help='Used to auto-categorise exceptions (Transit, Packaging, etc.)',
         )
@@ -1128,7 +1167,11 @@ def main():
                     + (' …' if len(df_raw.columns) > 8 else '')
                 )
 
-                src_name, src_type, cm = column_mapper_ui(src_key, df_raw, default_name=default_label)
+                src_name, src_type, cm = column_mapper_ui(
+                    src_key, df_raw,
+                    default_name=default_label,
+                    default_type=DEFAULT_TYPES[idx],
+                )
                 st.session_state[f'mapping_{src_key}'] = {'name': src_name, 'type': src_type, **cm}
                 source_data[src_key] = (src_name, src_type, df_raw, cm)
 
@@ -1165,7 +1208,12 @@ def main():
                     + (' …' if len(df_raw.columns) > 8 else '')
                 )
 
-                src_name, src_type, cm = column_mapper_ui(src_key, df_raw, default_name=default_label)
+                default_type_multi = DEFAULT_TYPES[idx] if idx < len(DEFAULT_TYPES) else None
+                src_name, src_type, cm = column_mapper_ui(
+                    src_key, df_raw,
+                    default_name=default_label,
+                    default_type=default_type_multi,
+                )
                 st.session_state[f'mapping_{src_key}'] = {'name': src_name, 'type': src_type, **cm}
                 source_data[src_key] = (src_name, src_type, df_raw, cm)
 
