@@ -304,7 +304,7 @@ def build_brs(s1, s1_name, s2, s2_name, matched, s1_only, s2_only):
         else 0
     )
     reconciled = s1_tot - s1o_tot + s2o_tot + m_diff
-    diff       = round(reconciled - s2_tot, 2)
+    diff       = round(abs(reconciled - s2_tot) if abs(reconciled - s2_tot) < AMOUNT_TOLERANCE else reconciled - s2_tot, 2)
     disc_cnt   = int(matched['_discrepancy'].sum()) if len(matched) > 0 else 0
 
     rows = [
@@ -366,6 +366,9 @@ def render_table(df, cm, height=400):
     if '_category' in df.columns:
         show = show + ['_category']
     show = [c for c in show if c in df.columns]
+    # Deduplicate preserving order — duplicate cols make df[col] return a DataFrame (no .dtype)
+    seen = set()
+    show = [c for c in show if not (c in seen or seen.add(c))]
     if not show:
         st.info('No columns to display.')
         return
@@ -380,14 +383,22 @@ def render_table(df, cm, height=400):
         cm.get('total'):        'Invoice Total (₹)',
         '_category':            'Category / Reason',
     }
-    display_df = df[show].rename(columns={k: v for k, v in rename_map.items() if k and k in show})
+    # .copy() prevents SettingWithCopyWarning on column writes below
+    display_df = df[show].copy()
+    display_df = display_df.rename(columns={k: v for k, v in rename_map.items() if k and k in show})
 
-    # Fix Arrow serialization: convert object/mixed-type columns to string
-    for col in display_df.columns:
-        if display_df[col].dtype == object or str(display_df[col].dtype) in ('object', 'string'):
-            display_df[col] = display_df[col].fillna('').astype(str).replace('nan', '')
+    # Fix Arrow serialization: safely convert object/mixed-type columns to clean strings
+    for col in list(display_df.columns):
+        try:
+            if pd.api.types.is_object_dtype(display_df[col]):
+                display_df[col] = (
+                    display_df[col].fillna('').astype(str)
+                    .replace({'nan': '', '<NA>': '', 'None': ''})
+                )
+        except Exception:
+            pass
 
-    # Apply category row colors if _category column is present (now renamed)
+    # Apply category row colors
     cat_col = 'Category / Reason'
     if cat_col in display_df.columns:
         def row_color(row):
@@ -395,8 +406,11 @@ def render_table(df, cm, height=400):
             if color:
                 return [f'background-color:{color}'] * len(row)
             return [''] * len(row)
-        styled = display_df.style.apply(row_color, axis=1)
-        st.dataframe(styled, use_container_width=True, height=height, hide_index=True)
+        try:
+            styled = display_df.style.apply(row_color, axis=1)
+            st.dataframe(styled, use_container_width=True, height=height, hide_index=True)
+        except Exception:
+            st.dataframe(display_df, use_container_width=True, height=height, hide_index=True)
     else:
         st.dataframe(display_df, use_container_width=True, height=height, hide_index=True)
 
