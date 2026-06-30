@@ -545,7 +545,8 @@ def _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map):
       Row 4+ : source rows with lookup columns filled, exception rows highlighted
       Bottom : other-source-only rows appended per other source (different color)
     """
-    own_cols = display_cols(src_cm, src_df)
+    # Use ALL source columns (excluding internal _ columns added by prepare_with_cm)
+    own_cols = [c for c in src_df.columns if not c.startswith('_')]
     if not own_cols:
         own_cols = [c for c in [src_cm.get('inv'), src_cm.get('total')] if c]
 
@@ -998,6 +999,31 @@ def column_mapper_ui(source_key, df, default_name='Source'):
     return src_name, src_type, cm
 
 # ─────────────────────────────────────────────
+# SMART SHEET DEFAULT PICKER
+# ─────────────────────────────────────────────
+
+# Keywords per source label (lowercase) — first match wins
+SHEET_KEYWORDS = {
+    'sales':      ['sales'],
+    'wms':        ['wms', 'purchase', 'grn'],
+    'zoho books': ['zoho', 'book'],
+    'zoho':       ['zoho', 'book'],
+    'purchase':   ['purchase', 'wms', 'grn'],
+}
+
+def smart_sheet_default(sheets, source_label):
+    """Return 0-based index of the sheet that best matches source_label."""
+    label = source_label.strip().lower()
+    keywords = SHEET_KEYWORDS.get(label, [label])
+    sheets_lower = [s.lower() for s in sheets]
+    for kw in keywords:
+        for i, sl in enumerate(sheets_lower):
+            if kw in sl:
+                return i
+    return 0
+
+
+# ─────────────────────────────────────────────
 # MAIN APP
 # ─────────────────────────────────────────────
 
@@ -1079,7 +1105,7 @@ def main():
                 saved_sheet = st.session_state.get(f'sheet_{src_key}')
                 default_sheet_idx = (
                     all_sheets.index(saved_sheet) if saved_sheet in all_sheets
-                    else min(idx, len(all_sheets) - 1)
+                    else smart_sheet_default(all_sheets, default_label)
                 )
                 chosen_sheet = st.selectbox(
                     'Sheet',
