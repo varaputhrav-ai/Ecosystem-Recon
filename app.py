@@ -643,79 +643,130 @@ def main():
 
     # ── STEP 1: Upload ──────────────────────────
     st.subheader('Step 1 — Upload Source Files')
-    st.caption('Upload up to 3 source files. Each can be a separate file or a combined workbook with multiple sheets.')
+    st.caption(
+        '**Option A:** Upload one combined workbook (all 3 sources in different sheets).  '
+        '**Option B:** Upload 2–3 separate files, one per source.'
+    )
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown('**Source 1**')
-        f1 = st.file_uploader('Source 1', type=['xlsx', 'xls'], key='f1',
+        st.markdown('**File 1**')
+        f1 = st.file_uploader('File 1', type=['xlsx', 'xls'], key='f1',
                                label_visibility='collapsed')
         if f1:
             st.success(f'✓ {f1.name}')
     with c2:
-        st.markdown('**Source 2**')
-        f2 = st.file_uploader('Source 2', type=['xlsx', 'xls'], key='f2',
+        st.markdown('**File 2** *(optional)*')
+        f2 = st.file_uploader('File 2', type=['xlsx', 'xls'], key='f2',
                                label_visibility='collapsed')
         if f2:
             st.success(f'✓ {f2.name}')
     with c3:
-        st.markdown('**Source 3** *(optional)*')
-        f3 = st.file_uploader('Source 3', type=['xlsx', 'xls'], key='f3',
+        st.markdown('**File 3** *(optional)*')
+        f3 = st.file_uploader('File 3', type=['xlsx', 'xls'], key='f3',
                                label_visibility='collapsed')
         if f3:
             st.success(f'✓ {f3.name}')
 
-    uploaded = [(k, f) for k, f in [('S1', f1), ('S2', f2), ('S3', f3)] if f is not None]
-    if len(uploaded) < 2:
-        st.info('👆 Upload at least 2 source files to begin.')
+    files = [f for f in [f1, f2, f3] if f is not None]
+    if not files:
+        st.info('👆 Upload at least one file to begin.')
         return
 
     st.divider()
 
     # ── STEP 2: Configure each source ──────────
-    st.subheader('Step 2 — Select Sheet & Map Columns')
-    st.caption('For each file, pick the sheet and tell the app which column is which. Smart guesses are pre-filled.')
+    st.subheader('Step 2 — Configure Sources')
+    st.caption('Pick the sheet for each source and map the columns. Smart guesses are pre-filled.')
 
-    DEFAULT_NAMES = {'S1': 'Sales', 'S2': 'WMS', 'S3': 'Zoho Books'}
-    source_data = {}
+    DEFAULT_NAMES  = ['Sales', 'WMS', 'Zoho Books']
+    DEFAULT_TYPES  = ['Sales', 'WMS / Purchase', 'Zoho Books']
+    source_data    = {}
 
-    for src_key, fobj in uploaded:
-        default_label = DEFAULT_NAMES.get(src_key, src_key)
-        with st.expander(f'📄 {fobj.name}  ({default_label})', expanded=True):
+    # If only 1 file uploaded → treat it as combined workbook: show 3 source configs all from same file
+    # If multiple files → one source config per file
+    if len(files) == 1:
+        combined_file = files[0]
+        try:
+            all_sheets = get_sheet_names(combined_file)
+        except Exception as e:
+            st.error(f'Cannot read file: {e}')
+            return
 
-            # Sheet picker
-            try:
-                sheets = get_sheet_names(fobj)
-            except Exception as e:
-                st.error(f'Cannot read file: {e}')
-                continue
+        st.info(f'📄 **{combined_file.name}** — {len(all_sheets)} sheets detected. '
+                f'Configure each source below by selecting the appropriate sheet.')
 
-            saved_sheet = st.session_state.get(f'sheet_{src_key}')
-            default_sheet_idx = sheets.index(saved_sheet) if saved_sheet in sheets else 0
-            chosen_sheet = st.selectbox(
-                'Sheet',
-                sheets,
-                index=default_sheet_idx,
-                key=f'sheet_sel_{src_key}',
-            )
-            st.session_state[f'sheet_{src_key}'] = chosen_sheet
+        for idx, src_key in enumerate(['S1', 'S2', 'S3']):
+            default_label = DEFAULT_NAMES[idx]
+            with st.expander(f'Source {idx+1} — {default_label}', expanded=True):
+                saved_sheet = st.session_state.get(f'sheet_{src_key}')
+                default_sheet_idx = (
+                    all_sheets.index(saved_sheet) if saved_sheet in all_sheets
+                    else min(idx, len(all_sheets) - 1)
+                )
+                chosen_sheet = st.selectbox(
+                    'Sheet',
+                    all_sheets,
+                    index=default_sheet_idx,
+                    key=f'sheet_sel_{src_key}',
+                )
+                st.session_state[f'sheet_{src_key}'] = chosen_sheet
 
-            try:
-                df_raw = load_sheet(fobj, chosen_sheet)
-            except Exception as e:
-                st.error(f'Could not load sheet "{chosen_sheet}": {e}')
-                continue
+                try:
+                    combined_file.seek(0)
+                    df_raw = load_sheet(combined_file, chosen_sheet)
+                except Exception as e:
+                    st.error(f'Could not load sheet "{chosen_sheet}": {e}')
+                    continue
 
-            st.caption(f'{len(df_raw):,} rows × {len(df_raw.columns)} columns  |  '
-                       f'Columns: {", ".join(df_raw.columns[:8])}'
-                       + (' …' if len(df_raw.columns) > 8 else ''))
+                st.caption(
+                    f'{len(df_raw):,} rows × {len(df_raw.columns)} columns  |  '
+                    f'Columns: {", ".join(df_raw.columns[:8])}'
+                    + (' …' if len(df_raw.columns) > 8 else '')
+                )
 
-            src_name, src_type, cm = column_mapper_ui(src_key, df_raw, default_name=default_label)
+                src_name, src_type, cm = column_mapper_ui(src_key, df_raw, default_name=default_label)
+                st.session_state[f'mapping_{src_key}'] = {'name': src_name, 'type': src_type, **cm}
+                source_data[src_key] = (src_name, src_type, df_raw, cm)
 
-            # Persist mapping in session state so it survives re-runs in same session
-            st.session_state[f'mapping_{src_key}'] = {'name': src_name, 'type': src_type, **cm}
-            source_data[src_key] = (src_name, src_type, df_raw, cm)
+    else:
+        # Multiple files — one source per file
+        for idx, fobj in enumerate(files):
+            src_key       = f'S{idx+1}'
+            default_label = DEFAULT_NAMES[idx] if idx < len(DEFAULT_NAMES) else f'Source {idx+1}'
+            with st.expander(f'📄 {fobj.name}  ({default_label})', expanded=True):
+                try:
+                    sheets = get_sheet_names(fobj)
+                except Exception as e:
+                    st.error(f'Cannot read file: {e}')
+                    continue
+
+                saved_sheet       = st.session_state.get(f'sheet_{src_key}')
+                default_sheet_idx = sheets.index(saved_sheet) if saved_sheet in sheets else 0
+                chosen_sheet      = st.selectbox(
+                    'Sheet', sheets,
+                    index=default_sheet_idx,
+                    key=f'sheet_sel_{src_key}',
+                )
+                st.session_state[f'sheet_{src_key}'] = chosen_sheet
+
+                try:
+                    df_raw = load_sheet(fobj, chosen_sheet)
+                except Exception as e:
+                    st.error(f'Could not load sheet "{chosen_sheet}": {e}')
+                    continue
+
+                st.caption(
+                    f'{len(df_raw):,} rows × {len(df_raw.columns)} columns  |  '
+                    f'Columns: {", ".join(df_raw.columns[:8])}'
+                    + (' …' if len(df_raw.columns) > 8 else '')
+                )
+
+                src_name, src_type, cm = column_mapper_ui(src_key, df_raw, default_name=default_label)
+                st.session_state[f'mapping_{src_key}'] = {'name': src_name, 'type': src_type, **cm}
+                source_data[src_key] = (src_name, src_type, df_raw, cm)
 
     if len(source_data) < 2:
+        st.warning('Configure at least 2 sources above to enable reconciliation.')
         return
 
     # ── STEP 3: Run ─────────────────────────────
