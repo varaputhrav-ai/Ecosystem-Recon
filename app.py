@@ -11,6 +11,37 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 from datetime import datetime
+import json
+import os
+
+# ─────────────────────────────────────────────
+# MAPPING PERSISTENCE (local mode)
+# ─────────────────────────────────────────────
+# Saves column mappings to mapping_config.json next to app.py so
+# the team never has to re-map columns each month.
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MAPPING_CONFIG_FILE = os.path.join(_APP_DIR, 'mapping_config.json')
+
+def load_saved_mappings():
+    try:
+        if os.path.exists(MAPPING_CONFIG_FILE):
+            with open(MAPPING_CONFIG_FILE, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_mappings_to_file(session_state):
+    """Persist mapping_S1/S2/S3 keys from session_state to disk."""
+    try:
+        data = {k: v for k, v in session_state.items()
+                if k.startswith('mapping_') and isinstance(v, dict)}
+        if data:
+            with open(MAPPING_CONFIG_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # CONSTANTS
@@ -420,20 +451,24 @@ def render_table(df, cm, height=400):
 
 # Lookup block columns per other source (matches Format.xlsx exactly)
 LOOKUP_FIELDS = [
-    ('entity',        'Entity Name'),
-    ('vendor',        'Vendor Name'),
-    ('taxable',       'Taxable value'),
-    ('tax',           'Tax Value'),
-    ('total',         'Total Value'),
-    ('entity_check',  'Entity Check'),
-    ('vendor_check',  'Vendor Check'),
-    ('taxable_diff',  'Taxable value Diff'),
-    ('tax_diff',      'Tax Value Diff'),
-    ('total_diff',    'Total Value Diff'),
-    ('remark',        'Remark'),
-    ('notes',         'Notes'),
+    ('entity',             'Entity Name'),
+    ('vendor',             'Vendor Name'),
+    ('seller_gstin',       'Seller GSTIN'),
+    ('buyer_gstin',        'Buyer GSTIN'),
+    ('seller_gstin_check', 'Seller GSTIN Check'),
+    ('buyer_gstin_check',  'Buyer GSTIN Check'),
+    ('taxable',            'Taxable value'),
+    ('tax',                'Tax Value'),
+    ('total',              'Total Value'),
+    ('entity_check',       'Entity Check'),
+    ('vendor_check',       'Vendor Check'),
+    ('taxable_diff',       'Taxable value Diff'),
+    ('tax_diff',           'Tax Value Diff'),
+    ('total_diff',         'Total Value Diff'),
+    ('remark',             'Remark'),
+    ('notes',              'Notes'),
 ]
-N_LOOKUP = len(LOOKUP_FIELDS)   # 12 columns per other source block
+N_LOOKUP = len(LOOKUP_FIELDS)   # 16 columns per other source block
 
 # Append-row colors per other source index
 APPEND_COLORS = ['FCE4D6', 'DDEBF7', 'E2EFDA']
@@ -642,11 +677,13 @@ def _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map):
 
         # Slim other df for merge
         o_fields = {
-            'buyer_name':  f'{prefix}_Entity',
-            'seller_name': f'{prefix}_Vendor',
-            'taxable':     f'{prefix}_Taxable',
-            'tax':         f'{prefix}_Tax',
-            'total':       f'{prefix}_Total',
+            'buyer_name':   f'{prefix}_Entity',
+            'seller_name':  f'{prefix}_Vendor',
+            'seller_gstin': f'{prefix}_SellerGSTIN',
+            'buyer_gstin':  f'{prefix}_BuyerGSTIN',
+            'taxable':      f'{prefix}_Taxable',
+            'tax':          f'{prefix}_Tax',
+            'total':        f'{prefix}_Total',
         }
         slim_cols = ['_inv']
         rename_m  = {}
@@ -665,15 +702,19 @@ def _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map):
         # Vectorized checks
         s_buy  = src_cm.get('buyer_name')
         s_sell = src_cm.get('seller_name')
+        s_sg   = src_cm.get('seller_gstin')
+        s_bg   = src_cm.get('buyer_gstin')
         s_tax  = src_cm.get('taxable')
         s_txv  = src_cm.get('tax')
         s_tot  = src_cm.get('total')
 
-        pe = f'{prefix}_Entity'
-        pv = f'{prefix}_Vendor'
-        pt = f'{prefix}_Taxable'
-        px = f'{prefix}_Tax'
-        po = f'{prefix}_Total'
+        pe  = f'{prefix}_Entity'
+        pv  = f'{prefix}_Vendor'
+        psg = f'{prefix}_SellerGSTIN'
+        pbg = f'{prefix}_BuyerGSTIN'
+        pt  = f'{prefix}_Taxable'
+        px  = f'{prefix}_Tax'
+        po  = f'{prefix}_Total'
 
         if s_buy and s_buy in output.columns and pe in output.columns:
             output[f'{prefix}_Entity_Check'] = np.where(
@@ -692,6 +733,24 @@ def _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map):
             )
         else:
             output[f'{prefix}_Vendor_Check'] = ''
+
+        if s_sg and s_sg in output.columns and psg in output.columns:
+            output[f'{prefix}_SellerGSTIN_Check'] = np.where(
+                output[psg].isna(), '',
+                np.where(output[s_sg].astype(str).str.strip() == output[psg].astype(str).str.strip(),
+                         'Match', 'Mismatch')
+            )
+        else:
+            output[f'{prefix}_SellerGSTIN_Check'] = ''
+
+        if s_bg and s_bg in output.columns and pbg in output.columns:
+            output[f'{prefix}_BuyerGSTIN_Check'] = np.where(
+                output[pbg].isna(), '',
+                np.where(output[s_bg].astype(str).str.strip() == output[pbg].astype(str).str.strip(),
+                         'Match', 'Mismatch')
+            )
+        else:
+            output[f'{prefix}_BuyerGSTIN_Check'] = ''
 
         for s_col, o_col, diff_name in [
             (s_tax, pt, f'{prefix}_Taxable_Diff'),
@@ -718,18 +777,22 @@ def _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map):
         prefix = li['prefix']
         for f_key, _ in LOOKUP_FIELDS:
             field_col_map = {
-                'entity':        f'{prefix}_Entity',
-                'vendor':        f'{prefix}_Vendor',
-                'taxable':       f'{prefix}_Taxable',
-                'tax':           f'{prefix}_Tax',
-                'total':         f'{prefix}_Total',
-                'entity_check':  f'{prefix}_Entity_Check',
-                'vendor_check':  f'{prefix}_Vendor_Check',
-                'taxable_diff':  f'{prefix}_Taxable_Diff',
-                'tax_diff':      f'{prefix}_Tax_Diff',
-                'total_diff':    f'{prefix}_Total_Diff',
-                'remark':        f'{prefix}_Remark',
-                'notes':         f'{prefix}_Notes',
+                'entity':             f'{prefix}_Entity',
+                'vendor':             f'{prefix}_Vendor',
+                'seller_gstin':       f'{prefix}_SellerGSTIN',
+                'buyer_gstin':        f'{prefix}_BuyerGSTIN',
+                'seller_gstin_check': f'{prefix}_SellerGSTIN_Check',
+                'buyer_gstin_check':  f'{prefix}_BuyerGSTIN_Check',
+                'taxable':            f'{prefix}_Taxable',
+                'tax':                f'{prefix}_Tax',
+                'total':              f'{prefix}_Total',
+                'entity_check':       f'{prefix}_Entity_Check',
+                'vendor_check':       f'{prefix}_Vendor_Check',
+                'taxable_diff':       f'{prefix}_Taxable_Diff',
+                'tax_diff':           f'{prefix}_Tax_Diff',
+                'total_diff':         f'{prefix}_Total_Diff',
+                'remark':             f'{prefix}_Remark',
+                'notes':              f'{prefix}_Notes',
             }
             write_cols.append(field_col_map[f_key])
 
@@ -883,6 +946,12 @@ def _write_source_sheet(ws, src_name, src_df, src_cm, others, result_map):
                     elif col == f'{li["prefix"]}_Vendor':
                         sc = o_cm.get('seller_name')
                         row_vals.append(str(o_row[sc]) if sc and sc in o_row.index else '')
+                    elif col == f'{li["prefix"]}_SellerGSTIN':
+                        sc = o_cm.get('seller_gstin')
+                        row_vals.append(str(o_row[sc]) if sc and sc in o_row.index else '')
+                    elif col == f'{li["prefix"]}_BuyerGSTIN':
+                        bc = o_cm.get('buyer_gstin')
+                        row_vals.append(str(o_row[bc]) if bc and bc in o_row.index else '')
                     elif col == f'{li["prefix"]}_Taxable':
                         tc = o_cm.get('taxable')
                         row_vals.append(o_row[tc] if tc and tc in o_row.index else '')
@@ -1094,6 +1163,14 @@ def main():
     .stTabs [data-baseweb="tab"]{font-weight:600;font-size:0.85rem}
     </style>""", unsafe_allow_html=True)
 
+    # Load saved column mappings from disk once per session
+    if 'mappings_loaded_from_disk' not in st.session_state:
+        saved = load_saved_mappings()
+        for k, v in saved.items():
+            if k not in st.session_state:
+                st.session_state[k] = v
+        st.session_state['mappings_loaded_from_disk'] = True
+
     st.title('📊 Ecosystem Purchase Recon')
     st.caption('Swiggy Instamart Finance | Month-End Reconciliation')
     st.divider()
@@ -1240,6 +1317,9 @@ def main():
     if not st.button('▶  Run Reconciliation', type='primary', use_container_width=True):
         st.caption('Review column mappings above, then click Run.')
         return
+
+    # Save column mappings to disk so they reload automatically next month
+    save_mappings_to_file(st.session_state)
 
     # Prepare dataframes with column maps
     prepared = {}
