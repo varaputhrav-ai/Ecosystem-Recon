@@ -105,27 +105,73 @@ def detect_header_row(rows):
             return i
     return 0
 
-def get_sheet_names(file_obj):
-    wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
+@st.cache_data(show_spinner=False)
+def _get_sheet_names_cached(file_bytes: bytes) -> list:
+    from io import BytesIO
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
     names = wb.sheetnames
     wb.close()
-    file_obj.seek(0)
     return names
 
-def load_sheet(file_obj, sheet_name):
-    wb = openpyxl.load_workbook(file_obj, read_only=True, data_only=True)
+def get_sheet_names(file_obj) -> list:
+    file_obj.seek(0)
+    file_bytes = file_obj.read()
+    file_obj.seek(0)
+    return _get_sheet_names_cached(file_bytes)
+
+@st.cache_data(show_spinner='Reading file…')
+def _load_sheet_cached(file_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+    """
+    Read a sheet using openpyxl streaming mode.
+    Cached by file content — large files are only read once per session.
+    """
+    from io import BytesIO
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
     ws = wb[sheet_name]
-    rows = list(ws.iter_rows(min_row=1, max_row=10, values_only=True))
+
+    # Single streaming pass — no double-read
+    all_rows = [list(r) for r in ws.iter_rows(values_only=True)]
     wb.close()
-    file_obj.seek(0)
-    hdr_idx = detect_header_row(rows)
-    df = pd.read_excel(file_obj, sheet_name=sheet_name, header=hdr_idx, engine='openpyxl')
-    df = df.dropna(how='all').dropna(axis=1, how='all')
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    hdr_idx = detect_header_row(all_rows[:15])
+
+    # Build clean headers
+    raw_headers = all_rows[hdr_idx]
+    headers = []
+    seen_h = {}
+    for i, val in enumerate(raw_headers):
+        h = str(val).strip() if val is not None else ''
+        if not h or h.lower().startswith('unnamed') or h in ('.', 'None', 'nan'):
+            h = f'__drop_{i}'
+        # deduplicate
+        if h in seen_h:
+            seen_h[h] += 1
+            h = f'{h}_{seen_h[h]}'
+        else:
+            seen_h[h] = 0
+        headers.append(h)
+
+    data_rows = all_rows[hdr_idx + 1:]
+    n = len(headers)
+    padded = [r[:n] + [None] * max(0, n - len(r)) for r in data_rows]
+
+    df = pd.DataFrame(padded, columns=headers)
+    df = df.dropna(how='all')
+    # Drop unnamed/blank columns
+    df = df[[c for c in df.columns if not c.startswith('__drop_')]]
+    df = df.dropna(axis=1, how='all')
     df.columns = [str(c).strip() for c in df.columns]
-    df = df[[c for c in df.columns
-             if not c.startswith('Unnamed') and c not in ('.', '', 'None')]]
-    file_obj.seek(0)
     return df
+
+def load_sheet(file_obj, sheet_name: str) -> pd.DataFrame:
+    """Public wrapper — converts UploadedFile to bytes for caching."""
+    file_obj.seek(0)
+    file_bytes = file_obj.read()
+    file_obj.seek(0)
+    return _load_sheet_cached(file_bytes, sheet_name)
 
 def to_num(s):
     return pd.to_numeric(s, errors='coerce').fillna(0)
